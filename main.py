@@ -32,7 +32,6 @@ from .utils import ADMIN_HELP, print_logo
 
 
 class QQAdminPlugin(Star):
-
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context = context
@@ -383,7 +382,7 @@ class QQAdminPlugin(Star):
         await self.file.upload_group_file(event, str(path))
 
     @filter.command("删除群文件", desc="删除群文件 <文件夹名/序号> <文件名/序号>")
-    @perm_required(PermLevel.MEMBER)
+    @perm_required(PermLevel.ADMIN)
     async def delete_group_file(
         self,
         event: AiocqhttpMessageEvent,
