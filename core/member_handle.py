@@ -37,10 +37,8 @@ class MemberHandle:
         info_list.sort(key=lambda x: datetime.strptime(x.split("：")[0], "%Y-%m-%d"))
         info_str = "进群时间：【等级】QQ-昵称\n\n"
         info_str += "\n\n".join(info_list)
-        # TODO 做张好看的图片来展示
         url = await self.plugin.text_to_image(info_str)
         await event.send(event.image_result(url))
-
 
     async def clear_group_member(
         self,
@@ -63,19 +61,21 @@ class MemberHandle:
         info_lines: list[str] = []
 
         # 获取配置：是否跳过有专属头衔的成员
-        skip_special = self.plugin.cfg.clear_member_skip_special_title
+        skip_special = getattr(self.plugin.cfg, 'clear_member_skip_special_title', False)
+        logger.info(f"[清理群友] 跳过专属头衔开关: {skip_special}")
 
-        for member in members_data:  # type: ignore
+        for member in members_data:
             last_sent = member.get("last_sent_time", 0)
             level = int(member.get("level", 0))
             user_id = member.get("user_id", "")
             nickname = member.get("nickname", "（无昵称）")
 
-            # 如果配置要求跳过有专属头衔的成员
+            # 兼容不同协议端的头衔字段名：优先 title（标准 OneBot），其次 special_title
             if skip_special:
-                special_title = member.get("special_title", "")
-                if special_title.strip():
-                    logger.debug(f"成员 {nickname}({user_id}) 拥有专属头衔 '{special_title}'，跳过清理")
+                # 获取头衔，OneBot v11 标准字段为 title
+                title = member.get("title", "") or member.get("special_title", "")
+                if title and title.strip():
+                    logger.debug(f"[清理群友] 成员 {nickname}({user_id}) 拥有专属头衔 '{title}'，跳过清理")
                     continue
 
             if last_sent < threshold_ts and level < under_level:
@@ -103,7 +103,7 @@ class MemberHandle:
 
         await event.send(event.chain_result([At(qq=cid) for cid in clear_ids]))
 
-        @session_waiter(timeout=60)  # type: ignore
+        @session_waiter(timeout=60)
         async def empty_mention_waiter(
             controller: SessionController, event: AiocqhttpMessageEvent
         ):
@@ -136,7 +136,7 @@ class MemberHandle:
 
         try:
             await empty_mention_waiter(event)
-        except TimeoutError as _:
+        except TimeoutError:
             await event.send(event.plain_result("等待超时！"))
         except Exception as e:
             logger.error("清理群友任务出错: " + str(e))
