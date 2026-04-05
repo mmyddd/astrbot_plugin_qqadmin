@@ -122,6 +122,7 @@ class PluginConfig(ConfigNode):
     llm_get_msg_count: int
     level_threshold: int
     perms: dict
+    clear_member_skip_special_title: bool
 
     _db_version = 3
     _plugin_name: str = "astrbot_plugin_qqadmin"

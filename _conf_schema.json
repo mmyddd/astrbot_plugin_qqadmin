@@ -207,6 +207,11 @@
     },
     "default": 50
   },
+  "clear_member_skip_special_title": {
+    "description": "清理群友时跳过有专属头衔的成员",
+    "type": "bool",
+    "default": false
+  },
   "perms": {
     "description": "指令权限管理",
     "hint": "设置各个命令的使用权限",

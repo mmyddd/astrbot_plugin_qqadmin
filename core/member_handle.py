@@ -62,11 +62,21 @@ class MemberHandle:
         clear_ids: list[int] = []
         info_lines: list[str] = []
 
+        # 获取配置：是否跳过有专属头衔的成员
+        skip_special = self.plugin.cfg.clear_member_skip_special_title
+
         for member in members_data:  # type: ignore
             last_sent = member.get("last_sent_time", 0)
             level = int(member.get("level", 0))
             user_id = member.get("user_id", "")
             nickname = member.get("nickname", "（无昵称）")
+
+            # 如果配置要求跳过有专属头衔的成员
+            if skip_special:
+                special_title = member.get("special_title", "")
+                if special_title.strip():
+                    logger.debug(f"成员 {nickname}({user_id}) 拥有专属头衔 '{special_title}'，跳过清理")
+                    continue
 
             if last_sent < threshold_ts and level < under_level:
                 clear_ids.append(user_id)
