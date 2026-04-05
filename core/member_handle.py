@@ -74,9 +74,6 @@ class MemberHandle:
             if skip_special and title and title.strip():
                 logger.info(f"[清理群友] 成员 {nickname}({user_id}) 拥有专属头衔 '{title}'，跳过清理")
                 continue
-            elif skip_special:
-                # 输出头衔获取情况（帮助排查）
-                logger.info(f"[清理群友] 成员 {nickname}({user_id}) 头衔字段值: title={member.get('title')}, special_title={member.get('special_title')}, card={member.get('card')}")
 
             if last_sent < threshold_ts and level < under_level:
                 clear_ids.append(user_id)
