@@ -98,7 +98,7 @@ class MemberHandle:
         url = await self.plugin.text_to_image(info_str)
         await event.send(event.image_result(url))
 
-        await event.send(event.chain_result([At(qq=cid) for cid in clear_ids]))
+        #await event.send(event.chain_result([At(qq=cid) for cid in clear_ids]))
 
         @session_waiter(timeout=60)
         async def empty_mention_waiter(
