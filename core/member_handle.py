@@ -64,10 +64,10 @@ class MemberHandle:
         skip_special = getattr(self.plugin.cfg, 'clear_member_skip_special_title', False)
         logger.info(f"[清理群友] 跳过专属头衔开关: {skip_special}")
 
-        # 调试：打印第一个成员的所有字段，方便查看头衔字段名
+        # 打印第一个成员的字段名（用于调试）
         if members_data:
             sample_keys = list(members_data[0].keys())
-            logger.debug(f"[清理群友] 成员数据字段示例: {sample_keys}")
+            logger.info(f"[清理群友] 成员数据字段示例: {sample_keys}")
 
         for member in members_data:
             last_sent = member.get("last_sent_time", 0)
@@ -78,12 +78,11 @@ class MemberHandle:
             # 尝试多种可能的头衔字段名
             title = member.get("title") or member.get("special_title") or member.get("card") or ""
             if skip_special and title and title.strip():
-                logger.debug(f"[清理群友] 成员 {nickname}({user_id}) 拥有专属头衔 '{title}'，跳过清理")
+                logger.info(f"[清理群友] 成员 {nickname}({user_id}) 拥有专属头衔 '{title}'，跳过清理")
                 continue
-
-            # 如果没有头衔，记录一下（可选，避免日志过多可注释）
-            elif skip_special and (not title or not title.strip()):
-                logger.debug(f"[清理群友] 成员 {nickname}({user_id}) 无专属头衔，继续判断")
+            elif skip_special:
+                # 输出头衔获取情况（帮助排查）
+                logger.info(f"[清理群友] 成员 {nickname}({user_id}) 头衔字段值: title={member.get('title')}, special_title={member.get('special_title')}, card={member.get('card')}")
 
             if last_sent < threshold_ts and level < under_level:
                 clear_ids.append(user_id)
