@@ -90,6 +90,43 @@ def is_whitelisted(member: dict, whitelist: set[str]) -> bool:
     return bool(keys & whitelist)
 
 
+async def describe_whitelist(
+    plugin: QQAdminPlugin,
+    event: AstrMessageEvent,
+    entries: list[str],
+) -> list[str]:
+    """把白名单条目转成「昵称（openid）」便于阅读，取不到成员列表时原样返回"""
+    if not entries:
+        return []
+
+    group_id = event.get_group_id()
+    members: list[dict] = []
+    if group_id:
+        try:
+            members = await QQOfficialApi.get_members(event, group_id)
+        except Exception:
+            members = []
+
+    index: dict[str, dict] = {}
+    for member in members:
+        for key in (
+            member.get("member_openid"),
+            member.get("union_openid"),
+            member.get("username"),
+        ):
+            if key:
+                index.setdefault(str(key).lower(), member)
+
+    described: list[str] = []
+    for entry in entries:
+        member = index.get(str(entry).lower())
+        if member is None:
+            described.append(str(entry))
+        else:
+            described.append(f"{member_name(member)}（{member.get('member_openid')}）")
+    return described
+
+
 async def collect_candidates(
     plugin: QQAdminPlugin,
     event: AstrMessageEvent,

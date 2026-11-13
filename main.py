@@ -12,7 +12,9 @@ from .core import (
     QQOfficialApi,
     QQOfficialMessageEvent,
     clear_group_member,
+    describe_whitelist,
     get_group_member_list,
+    parse_whitelist_args,
 )
 from .data import ActivityStore
 from .permission import (
@@ -91,36 +93,48 @@ class QQAdminPlugin(Star):
     @filter.command("清理白名单", alias={"免清理名单"})
     @perm_required(perm_key="clear_whitelist")
     async def clear_whitelist(self, event: QQOfficialMessageEvent):
-        "清理白名单 | 清理白名单 +昵称 -昵称（不带符号则覆写）"
+        "清理白名单 | 清理白名单 添加/删除 @群友（不带动作则覆写）"
         raw: str = event.message_str.partition(" ")[2].strip()
         current = self.cfg.get_whitelist()
 
         if not raw:
             if current:
+                shown = await describe_whitelist(self, event, current)
                 yield event.plain_result(
-                    "【清理白名单】以下群友不会被清理：\n" + "\n".join(f"- {i}" for i in current)
+                    "【清理白名单】以下群友不会被清理：\n"
+                    + "\n".join(f"- {i}" for i in shown)
                 )
             else:
-                yield event.plain_result("【清理白名单】为空，可用 \"清理白名单 +昵称\" 添加")
+                yield event.plain_result(
+                    "【清理白名单】为空，可用 \"清理白名单 添加 @群友\" 添加"
+                )
             return
 
-        tokens = [t for t in re.split(r"[\s,，、]+", raw) if t]
-        if any(t[0] in "+-" for t in tokens):
-            add = [t[1:] for t in tokens if t[0] == "+" and len(t) > 1]
-            remove = [t[1:] for t in tokens if t[0] == "-" and len(t) > 1]
-            lowered = {item.lower() for item in remove}
-            merged = [item for item in current if item.lower() not in lowered]
-            for item in add:
-                if item not in merged:
-                    merged.append(item)
+        args = parse_whitelist_args(raw)
+        if not args:
+            yield event.plain_result(
+                "没解析到要处理的群友，试试：清理白名单 添加 @群友"
+            )
+            return
+
+        if any(sign is not None for sign, _ in args):
+            add = [value for sign, value in args if sign == "+"]
+            remove = {value.lower() for sign, value in args if sign == "-"}
+            merged = [item for item in current if item.lower() not in remove]
+            existed = {item.lower() for item in merged}
+            for value in add:
+                if value.lower() not in existed:
+                    merged.append(value)
+                    existed.add(value.lower())
         else:
-            merged = tokens
+            merged = [value for _, value in args]
 
         self.cfg.save_whitelist(merged)
         if merged:
+            shown = await describe_whitelist(self, event, merged)
             yield event.plain_result(
                 f"【清理白名单】已更新，共 {len(merged)} 位：\n"
-                + "\n".join(f"- {i}" for i in merged)
+                + "\n".join(f"- {i}" for i in shown)
             )
         else:
             yield event.plain_result("【清理白名单】已清空")
