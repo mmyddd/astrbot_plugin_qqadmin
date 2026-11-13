@@ -59,7 +59,7 @@
   },
   "perms": {
     "description": "指令权限管理",
-    "hint": "设置各个命令的使用权限（官方 API 不提供群成员角色，这里只区分超管与普通成员）",
+    "hint": "设置各个命令的使用权限（群主/管理员来自官方群成员角色，与清理群友的判定一致）",
     "type": "object",
     "items": {
       "get_group_member_list": {
@@ -67,6 +67,8 @@
         "type": "string",
         "options": [
           "超管",
+          "群主",
+          "管理员",
           "成员"
         ],
         "default": "成员"
@@ -77,6 +79,8 @@
         "type": "string",
         "options": [
           "超管",
+          "群主",
+          "管理员",
           "成员"
         ],
         "default": "超管"
@@ -86,6 +90,8 @@
         "type": "string",
         "options": [
           "超管",
+          "群主",
+          "管理员",
           "成员"
         ],
         "default": "成员"
@@ -95,6 +101,8 @@
         "type": "string",
         "options": [
           "超管",
+          "群主",
+          "管理员",
           "成员"
         ],
         "default": "超管"
@@ -105,6 +113,8 @@
         "type": "string",
         "options": [
           "超管",
+          "群主",
+          "管理员",
           "成员"
         ],
         "default": "超管"

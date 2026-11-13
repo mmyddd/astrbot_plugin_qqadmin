@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from enum import IntEnum
 from functools import wraps
@@ -10,21 +11,28 @@ from astrbot import logger
 from astrbot.api.event import AstrMessageEvent
 
 from .config import PluginConfig
+from .core.api import QQOfficialApi
 
 
 class PermLevel(IntEnum):
     """
     定义用户的权限等级。数字越小，权限越高。
-    官方 API 不提供群成员角色以外的信息，因此只有 超管 / 成员 两级判定。
+
+    群主 / 管理员来自官方成员接口的 member_role 字段
+    （owner / admin / member），与执行踢人时用的是同一份数据。
     """
 
     SUPERUSER = 0
-    MEMBER = 1
-    UNKNOWN = 2
+    OWNER = 1
+    ADMIN = 2
+    MEMBER = 3
+    UNKNOWN = 4
 
     def __str__(self):
         return {
             PermLevel.SUPERUSER: "超管",
+            PermLevel.OWNER: "群主",
+            PermLevel.ADMIN: "管理员",
             PermLevel.MEMBER: "成员",
             PermLevel.UNKNOWN: "未知/无权限",
         }.get(self, "未知/无权限")
@@ -33,6 +41,8 @@ class PermLevel(IntEnum):
     def from_str(cls, perm_str: str):
         mapping = {
             "超管": cls.SUPERUSER,
+            "群主": cls.OWNER,
+            "管理员": cls.ADMIN,
             "成员": cls.MEMBER,
             "未知": cls.UNKNOWN,
             "无权限": cls.UNKNOWN,
@@ -46,6 +56,11 @@ class PermissionManager:
     def __init__(self):
         self.cfg: PluginConfig | None = None
         self.perms: dict[str, PermLevel] | None = None
+        # 群成员角色缓存：(group_id, member_openid) -> (角色, 过期时间)
+        # 命中正角色的缓存 5 分钟，未取到角色的负缓存 1 分钟，避免频繁打官方接口
+        self._role_cache: dict[tuple[str, str], tuple[str | None, float]] = {}
+        self._role_ttl = 300.0
+        self._role_negative_ttl = 60.0
 
     def lazy_init(self, config: PluginConfig):
         if self._initialized:
@@ -58,12 +73,55 @@ class PermissionManager:
         sender_id = event.get_sender_id()
         return bool(self.cfg and sender_id and str(sender_id) in self.cfg.admins_id)
 
+    async def get_group_role(
+        self, event: AstrMessageEvent, member_openid: str | None = None
+    ) -> str | None:
+        """读取群成员角色（owner / admin / member），带进程内缓存"""
+        group_id = event.get_group_id()
+        target = str(member_openid or event.get_sender_id() or "")
+        if not group_id or not target:
+            return None
+
+        key = (str(group_id), target)
+        cached = self._role_cache.get(key)
+        if cached is not None and cached[1] > time.time():
+            return cached[0]
+
+        try:
+            role = await QQOfficialApi.get_member_role(event, group_id, target)
+        except Exception as e:
+            # 接口不可用（例如白名单未开通、频控、网络异常）时降级处理：
+            # 不阻断成员即可执行的指令，但也不会因此获得管理员权限
+            logger.warning(f"[权限] 获取群成员角色失败，按普通成员处理：{e}")
+            return None
+
+        ttl = self._role_ttl if role else self._role_negative_ttl
+        self._role_cache[key] = (role, time.time() + ttl)
+        return role
+
+    def clear_role_cache(self):
+        """成员角色变化后（进群/退群/改管理员）可主动清空缓存"""
+        self._role_cache.clear()
+
     async def get_perm_level(self, event: AstrMessageEvent) -> PermLevel:
         if await self.is_superuser(event):
             return PermLevel.SUPERUSER
-        if event.get_sender_id():
-            return PermLevel.MEMBER
-        return PermLevel.UNKNOWN
+
+        if not event.get_sender_id():
+            return PermLevel.UNKNOWN
+
+        role = await self.get_group_role(event)
+        match role:
+            case "owner":
+                return PermLevel.OWNER
+            case "admin":
+                return PermLevel.ADMIN
+            case "member":
+                return PermLevel.MEMBER
+            case _:
+                # 私聊，或角色接口不可用时，按普通成员处理：
+                # 保证「成员」级指令仍可用，同时不会误放行管理员级指令
+                return PermLevel.MEMBER
 
     async def perm_block(
         self,
@@ -74,7 +132,11 @@ class PermissionManager:
         if group_only and not event.get_group_id():
             return "本指令仅限群聊使用"
 
+        if not event.get_sender_id():
+            return "无法识别你的身份，请稍后再试"
+
         user_level = await self.get_perm_level(event)
+
         # 未指定权限，则默认至少需要成员权限
         required_level = (self.perms or {}).get(perm_key, PermLevel.MEMBER)
 

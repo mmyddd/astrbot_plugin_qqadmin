@@ -80,6 +80,41 @@ class QQOfficialApi:
         return members
 
     @classmethod
+    async def get_member_info(
+        cls, event: Any, group_openid: str, member_openid: str
+    ) -> dict:
+        """获取单个群成员信息（含 member_role：owner / admin / member）"""
+        data = await cls.request(
+            event,
+            "GET",
+            "/v2/groups/{group_openid}/members/{member_openid}",
+            json={},
+        )
+        return data if isinstance(data, dict) else {}
+
+    @classmethod
+    async def get_member_role(
+        cls, event: Any, group_openid: str, member_openid: str
+    ) -> str | None:
+        """获取群成员角色，单成员接口不可用时回退到成员列表"""
+        try:
+            info = await cls.get_member_info(event, group_openid, member_openid)
+            role = info.get("member_role")
+            if role:
+                return str(role)
+        except Exception:
+            pass
+
+        try:
+            for member in await cls.get_members(event, group_openid):
+                if str(member.get("member_openid") or "") == str(member_openid):
+                    role = member.get("member_role")
+                    return str(role) if role else None
+        except Exception:
+            pass
+        return None
+
+    @classmethod
     async def batch_remove_members(
         cls,
         event: Any,
