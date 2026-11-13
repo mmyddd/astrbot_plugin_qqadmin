@@ -18,6 +18,12 @@
       }
     }
   },
+  "clear_whitelist": {
+    "description": "清理白名单（不参与清理的群友）",
+    "hint": "名单里的群友，执行「清理群友」时会被跳过。可填群成员的 member_openid、union_openid 或群昵称；也可在群内用命令「清理白名单 +昵称 / -昵称」增删",
+    "type": "list",
+    "default": []
+  },
   "inactive_days_limit": {
     "description": "未发言天数上限",
     "hint": "命令中可填写的最大未发言天数，防止误操作传入过大数值",
@@ -75,6 +81,16 @@
       },
       "reset_config": {
         "description": "群管重置",
+        "type": "string",
+        "options": [
+          "超管",
+          "成员"
+        ],
+        "default": "超管"
+      },
+      "clear_whitelist": {
+        "description": "清理白名单",
+        "hint": "包括：清理白名单（查看/增删）",
         "type": "string",
         "options": [
           "超管",

@@ -72,23 +72,43 @@ async def get_group_member_list(plugin: QQAdminPlugin, event: AstrMessageEvent):
     yield event.plain_result("\n".join(lines))
 
 
+def build_whitelist(entries: list[str]) -> set[str]:
+    """清理白名单统一转小写，可填 member_openid / union_openid / 昵称"""
+    return {str(e).strip().lower() for e in entries if str(e).strip()}
+
+
+def is_whitelisted(member: dict, whitelist: set[str]) -> bool:
+    """判断成员是否命中清理白名单"""
+    if not whitelist:
+        return False
+    keys = {
+        str(member.get("member_openid") or "").strip().lower(),
+        str(member.get("union_openid") or "").strip().lower(),
+        str(member.get("username") or "").strip().lower(),
+    }
+    keys.discard("")
+    return bool(keys & whitelist)
+
+
 async def collect_candidates(
     plugin: QQAdminPlugin,
     event: AstrMessageEvent,
     group_id: str,
     inactive_days: int,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict]]:
     """按「未发言天数」筛选普通成员。
 
     Returns:
-        (待清理列表, 本地无发言记录而被跳过的列表)
+        (待清理列表, 本地无发言记录而被跳过的列表, 命中清理白名单而被跳过的列表)
     """
     members = await QQOfficialApi.get_members(event, group_id)
     activity = await plugin.store.get_activity(group_id)
 
+    whitelist = build_whitelist(plugin.cfg.get_whitelist())
     threshold = time.time() - inactive_days * 86400
     clear_list: list[dict] = []
     unknown_list: list[dict] = []
+    whitelisted: list[dict] = []
 
     for member in members:
         openid = str(member.get("member_openid") or "")
@@ -96,6 +116,17 @@ async def collect_candidates(
             continue
         # 群主与管理员无法被移除，直接跳过
         if str(member.get("member_role")) != "member":
+            continue
+
+        # 白名单中的群友一律不清理
+        if is_whitelisted(member, whitelist):
+            whitelisted.append(
+                {
+                    "member_openid": openid,
+                    "username": member_name(member),
+                    "joined_at": member.get("joined_at"),
+                }
+            )
             continue
 
         record = activity.get(openid)
@@ -125,7 +156,8 @@ async def collect_candidates(
 
     clear_list.sort(key=lambda m: m.get("last_active") or 0)
     unknown_list.sort(key=lambda m: str(m.get("joined_at") or ""))
-    return clear_list, unknown_list
+    whitelisted.sort(key=lambda m: (m.get("username") or "", m.get("joined_at") or ""))
+    return clear_list, unknown_list, whitelisted
 
 
 async def clear_group_member(
@@ -160,7 +192,7 @@ async def clear_group_member(
         return
 
     try:
-        clear_list, unknown_list = await collect_candidates(
+        clear_list, unknown_list, whitelisted = await collect_candidates(
             plugin, event, group_id, days
         )
     except Exception as e:
@@ -169,6 +201,8 @@ async def clear_group_member(
 
     if not clear_list:
         tip = f"没有超过 **{days}** 天未发言的普通群友"
+        if whitelisted:
+            tip += f"（其中 {len(whitelisted)} 位在清理白名单中，已跳过）"
         if unknown_list:
             tip += f"（另有 {len(unknown_list)} 位群友本地无发言记录，已跳过）"
         yield event.plain_result(tip)
@@ -185,6 +219,13 @@ async def clear_group_member(
         )
     if len(clear_list) > 50:
         lines.append(f"- …… 还有 {len(clear_list) - 50} 位")
+    if whitelisted:
+        lines.append("")
+        lines.append(
+            f"另有 **{len(whitelisted)}** 位群友在清理白名单中，已跳过："
+            + "、".join(m["username"] for m in whitelisted[:20])
+            + ("……" if len(whitelisted) > 20 else "")
+        )
     if unknown_list:
         lines.append("")
         lines.append(f"另有 **{len(unknown_list)}** 位群友本地没有发言记录，已跳过")
@@ -203,7 +244,7 @@ async def _run_clear(
     """二次确认后执行批量移除"""
     await event.send(event.plain_result("清理中..."))
     try:
-        clear_list, _ = await collect_candidates(plugin, event, group_id, days)
+        clear_list, _, _ = await collect_candidates(plugin, event, group_id, days)
     except Exception as e:
         yield event.plain_result(f"获取群成员信息失败：{e}")
         return

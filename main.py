@@ -1,4 +1,5 @@
 import random
+import re
 
 from astrbot import logger
 from astrbot.api.event import filter
@@ -86,6 +87,43 @@ class QQAdminPlugin(Star):
             confirm=is_confirm,
         ):
             yield result
+
+    @filter.command("清理白名单", alias={"免清理名单"})
+    @perm_required(perm_key="clear_whitelist")
+    async def clear_whitelist(self, event: QQOfficialMessageEvent):
+        "清理白名单 | 清理白名单 +昵称 -昵称（不带符号则覆写）"
+        raw: str = event.message_str.partition(" ")[2].strip()
+        current = self.cfg.get_whitelist()
+
+        if not raw:
+            if current:
+                yield event.plain_result(
+                    "【清理白名单】以下群友不会被清理：\n" + "\n".join(f"- {i}" for i in current)
+                )
+            else:
+                yield event.plain_result("【清理白名单】为空，可用 \"清理白名单 +昵称\" 添加")
+            return
+
+        tokens = [t for t in re.split(r"[\s,，、]+", raw) if t]
+        if any(t[0] in "+-" for t in tokens):
+            add = [t[1:] for t in tokens if t[0] == "+" and len(t) > 1]
+            remove = [t[1:] for t in tokens if t[0] == "-" and len(t) > 1]
+            lowered = {item.lower() for item in remove}
+            merged = [item for item in current if item.lower() not in lowered]
+            for item in add:
+                if item not in merged:
+                    merged.append(item)
+        else:
+            merged = tokens
+
+        self.cfg.save_whitelist(merged)
+        if merged:
+            yield event.plain_result(
+                f"【清理白名单】已更新，共 {len(merged)} 位：\n"
+                + "\n".join(f"- {i}" for i in merged)
+            )
+        else:
+            yield event.plain_result("【清理白名单】已清空")
 
     # ====================== 群管配置 ======================
 

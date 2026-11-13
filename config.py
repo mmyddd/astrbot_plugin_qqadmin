@@ -109,6 +109,7 @@ class ConfigNode:
 
 class PluginConfig(ConfigNode):
     default: dict
+    clear_whitelist: list
     inactive_days_limit: int
     clear_batch_size: int
     perms: dict
@@ -128,6 +129,26 @@ class PluginConfig(ConfigNode):
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.batch_size = max(1, min(int(self.clear_batch_size or 20), 20))
+
+    def get_whitelist(self) -> list[str]:
+        """清理白名单：member_openid / union_openid / 昵称 均可"""
+        raw = self.clear_whitelist or []
+        if isinstance(raw, str):
+            raw = raw.replace("，", ",").replace(" ", ",").split(",")
+        return [str(item).strip() for item in raw if str(item).strip()]
+
+    def save_whitelist(self, entries: list[str]) -> None:
+        """把白名单写回插件配置（面板中可见、重启后保留）"""
+        cleaned: list[str] = []
+        for item in entries:
+            item = str(item).strip()
+            if item and item not in cleaned:
+                cleaned.append(item)
+        self.clear_whitelist = cleaned
+        try:
+            self.save_config()
+        except Exception as e:  # 面板配置未加载时退化为仅内存生效
+            logger.error(f"[清理群友] 白名单保存到插件配置失败：{e}")
 
     @staticmethod
     def _clean_ids(ids: list) -> list[str]:
