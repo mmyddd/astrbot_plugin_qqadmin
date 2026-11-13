@@ -152,5 +152,14 @@ class PluginConfig(ConfigNode):
 
     @staticmethod
     def _clean_ids(ids: list) -> list[str]:
-        """过滤并规范化数字 ID"""
-        return [str(i) for i in ids if str(i).isdigit()]
+        """规范化超管 ID。
+
+        原先只保留纯数字（aiocqhttp 的 QQ 号），但官方接口下发的是
+        member_openid（字母数字混合），因此这里保留任意非空 ID。
+        """
+        result: list[str] = []
+        for item in ids or []:
+            text = str(item).strip()
+            if text and text not in result:
+                result.append(text)
+        return result

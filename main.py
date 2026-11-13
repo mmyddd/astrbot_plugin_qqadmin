@@ -61,6 +61,38 @@ class QQAdminPlugin(Star):
         except Exception as e:
             logger.error(f"[清理群友] 记录群友活跃度失败：{e}")
 
+    # ====================== 身份自检 ======================
+
+    @filter.command("我的信息", alias={"我是谁"})
+    async def my_info(self, event: QQOfficialMessageEvent):
+        """查看当前平台下的身份标识（排查权限问题用）"""
+        sender_id = event.get_sender_id() or "（未知）"
+        group_id = event.get_group_id() or "（私聊）"
+        platform = event.get_platform_name()
+
+        role = await perm_manager.get_group_role(event)
+        role_text = {
+            "owner": "群主",
+            "admin": "管理员",
+            "member": "成员",
+        }.get(str(role), "未知（官方成员接口不可用）")
+
+        is_super = await perm_manager.is_superuser(event)
+        lines = [
+            "【我的信息】",
+            f"- 平台：{platform}",
+            f"- 我的 OpenID：{sender_id}",
+            f"- 本群 OpenID：{group_id}",
+            f"- 本群身份：{role_text}",
+            f"- 是否超管：{'是' if is_super else '否'}",
+        ]
+        if not is_super:
+            lines.append("")
+            lines.append(
+                "如需超管权限：把上面的 OpenID 填进 AstrBot 的「管理员 ID」列表"
+            )
+        yield event.plain_result("\n".join(lines))
+
     # ====================== 群成员工具 ======================
 
     @filter.command("群友信息", desc="查看群友信息")
