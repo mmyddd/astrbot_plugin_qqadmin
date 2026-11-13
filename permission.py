@@ -85,7 +85,15 @@ class PermissionManager:
     # ====================== 超管判定 ======================
 
     async def is_superuser(self, event: AstrMessageEvent) -> bool:
-        """超管 = AstrBot 全局 admins_id（与插件改造前保持一致）"""
+        """超管 = AstrBot 全局 admins_id（与插件改造前保持一致）。
+
+        两个来源都会认：
+        1. AstrBot 唤醒阶段已经比对过 admins_id，命中时会把 event.role 置为 admin；
+        2. 这里再比对一次 admins_id，忽略大小写，兼容官方接口下发的 OpenID。
+        """
+        if getattr(event, "role", None) == "admin":
+            return True
+
         if not self.cfg:
             return False
 
