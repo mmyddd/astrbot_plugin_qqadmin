@@ -18,6 +18,7 @@ class ActivityStore:
     # ====================== 字段中英文映射 ======================
     FIELD_MAP = {
         "inactive_days": "未发言天数",
+        "joined_days": "入群天数",
     }
 
     REVERSE_FIELD_MAP = {v: k for k, v in FIELD_MAP.items()}

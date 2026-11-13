@@ -75,17 +75,26 @@ class QQAdminPlugin(Star):
         self,
         event: QQOfficialMessageEvent,
         days: str | None = None,
+        joined_days: str | None = None,
         confirm: str | None = None,
     ):
-        "清理群友 <未发言天数>；确认执行：清理群友 <未发言天数> 确认"
-        raw = (days or "").strip()
-        is_confirm = (confirm or "").strip() == "确认" or raw == "确认"
-        if raw == "确认":
-            raw = ""
+        "清理群友 <未发言天数> <入群天数>；确认执行后在末尾加 确认"
+        raw_days = (days or "").strip()
+        raw_joined = (joined_days or "").strip()
+        raw_confirm = (confirm or "").strip()
+
+        is_confirm = raw_confirm == "确认" or raw_days == "确认" or raw_joined == "确认"
+        # 参数个数不固定时，确认词可能落在任意位置
+        if raw_days == "确认":
+            raw_days = ""
+        if raw_joined == "确认":
+            raw_joined = ""
+
         async for result in clear_group_member(
             self,
             event,
-            days=raw or None,
+            days=raw_days or None,
+            joined_days=raw_joined or None,
             confirm=is_confirm,
         ):
             yield result

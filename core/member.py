@@ -25,21 +25,55 @@ ROLE_MAP = {
 }
 
 
-def format_ts(value: Any, fmt: str = "%Y-%m-%d") -> str:
-    """把 RFC3339 时间字符串或时间戳格式化为 YYYY-MM-DD"""
-    if not value:
-        return "未知"
+def parse_ts(value: Any) -> float | None:
+    """把 RFC3339 时间字符串或时间戳转成 epoch 秒"""
+    if value in (None, ""):
+        return None
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value).strftime(fmt)
+        return float(value)
     try:
         text = str(value).replace("Z", "+00:00")
-        return datetime.fromisoformat(text).strftime(fmt)
+        return datetime.fromisoformat(text).timestamp()
     except ValueError:
-        return str(value)
+        return None
+
+
+def format_ts(value: Any, fmt: str = "%Y-%m-%d") -> str:
+    """把 RFC3339 时间字符串或时间戳格式化为 YYYY-MM-DD"""
+    stamped = parse_ts(value)
+    if stamped is None:
+        return "未知"
+    return datetime.fromtimestamp(stamped).strftime(fmt)
 
 
 def member_name(member: dict, fallback: str = "（无昵称）") -> str:
     return str(member.get("username") or fallback)
+
+
+def build_whitelist(entries: list[str]) -> set[str]:
+    """清理白名单统一转小写，可填 member_openid / union_openid / 昵称"""
+    return {str(e).strip().lower() for e in entries if str(e).strip()}
+
+
+def is_whitelisted(member: dict, whitelist: set[str]) -> bool:
+    """判断成员是否命中清理白名单"""
+    if not whitelist:
+        return False
+    keys = {
+        str(member.get("member_openid") or "").strip().lower(),
+        str(member.get("union_openid") or "").strip().lower(),
+        str(member.get("username") or "").strip().lower(),
+    }
+    keys.discard("")
+    return bool(keys & whitelist)
+
+
+def describe_condition(inactive_days: int, joined_days: int | None) -> str:
+    """把筛选条件描述成一句中文，供预览与结果复用"""
+    text = f"**{inactive_days}** 天未发言"
+    if joined_days:
+        text += f"，且入群时间不超过 **{joined_days}** 天"
+    return text
 
 
 async def get_group_member_list(plugin: QQAdminPlugin, event: AstrMessageEvent):
@@ -70,24 +104,6 @@ async def get_group_member_list(plugin: QQAdminPlugin, event: AstrMessageEvent):
         )
 
     yield event.plain_result("\n".join(lines))
-
-
-def build_whitelist(entries: list[str]) -> set[str]:
-    """清理白名单统一转小写，可填 member_openid / union_openid / 昵称"""
-    return {str(e).strip().lower() for e in entries if str(e).strip()}
-
-
-def is_whitelisted(member: dict, whitelist: set[str]) -> bool:
-    """判断成员是否命中清理白名单"""
-    if not whitelist:
-        return False
-    keys = {
-        str(member.get("member_openid") or "").strip().lower(),
-        str(member.get("union_openid") or "").strip().lower(),
-        str(member.get("username") or "").strip().lower(),
-    }
-    keys.discard("")
-    return bool(keys & whitelist)
 
 
 async def describe_whitelist(
@@ -132,17 +148,28 @@ async def collect_candidates(
     event: AstrMessageEvent,
     group_id: str,
     inactive_days: int,
+    joined_days: int | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """按「未发言天数」筛选普通成员。
+    """筛选待清理的普通成员。
+
+    条件：普通成员 + 不在白名单 + 超过 inactive_days 天未发言
+         （可选）入群时间不超过 joined_days 天
+
+    官方 API 没有「最后发言时间」，这里用插件本地记录的活跃时间判断；
+    没有本地记录的群友，只有在指定了入群时间时才视为「从未发言」纳入候选，
+    否则单独列出并跳过，避免误伤。
 
     Returns:
-        (待清理列表, 本地无发言记录而被跳过的列表, 命中清理白名单而被跳过的列表)
+        (待清理列表, 无发言记录被跳过的列表, 命中白名单被跳过的列表)
     """
     members = await QQOfficialApi.get_members(event, group_id)
     activity = await plugin.store.get_activity(group_id)
 
     whitelist = build_whitelist(plugin.cfg.get_whitelist())
-    threshold = time.time() - inactive_days * 86400
+    now = time.time()
+    inactive_threshold = now - inactive_days * 86400
+    joined_threshold = now - joined_days * 86400 if joined_days else None
+
     clear_list: list[dict] = []
     unknown_list: list[dict] = []
     whitelisted: list[dict] = []
@@ -166,53 +193,70 @@ async def collect_candidates(
             )
             continue
 
+        joined_at = parse_ts(member.get("joined_at"))
+
+        # 入群时间筛选：只保留「入群不超过 N 天」的群友
+        if joined_threshold is not None:
+            if joined_at is None or joined_at < joined_threshold:
+                continue
+
+        base = {
+            "member_openid": openid,
+            "username": member_name(member),
+            "joined_at": member.get("joined_at"),
+        }
+
         record = activity.get(openid)
         if not record:
-            unknown_list.append(
-                {
-                    "member_openid": openid,
-                    "username": member_name(member),
-                    "last_active": None,
-                    "joined_at": member.get("joined_at"),
-                }
-            )
+            if joined_threshold is None:
+                unknown_list.append({**base, "last_active": None})
+                continue
+            # 指定了入群时间：入群后一直没有发言记录，视为从未发言
+            clear_list.append({**base, "last_active": None})
             continue
 
         last_active = float(record.get("last_active") or 0)
-        if last_active >= threshold:
+        if last_active >= inactive_threshold:
             continue
 
-        clear_list.append(
-            {
-                "member_openid": openid,
-                "username": member_name(member),
-                "last_active": last_active,
-                "joined_at": member.get("joined_at"),
-            }
-        )
+        clear_list.append({**base, "last_active": last_active})
 
-    clear_list.sort(key=lambda m: m.get("last_active") or 0)
+    clear_list.sort(key=lambda m: (m.get("last_active") or 0, str(m.get("joined_at") or "")))
     unknown_list.sort(key=lambda m: str(m.get("joined_at") or ""))
     whitelisted.sort(key=lambda m: (m.get("username") or "", m.get("joined_at") or ""))
     return clear_list, unknown_list, whitelisted
+
+
+def format_candidate(member: dict) -> str:
+    """候选成员的单行描述"""
+    joined = format_ts(member.get("joined_at"))
+    last_active = member.get("last_active")
+    active = "从未发言" if last_active is None else f"最后发言 {format_ts(last_active)}"
+    return (
+        f"- 入群 {joined}｜{active}｜{member.get('username')}"
+        f"（{member.get('member_openid')}）"
+    )
 
 
 async def clear_group_member(
     plugin: QQAdminPlugin,
     event: AstrMessageEvent,
     days: str | int | None = None,
+    joined_days: str | int | None = None,
     confirm: bool = False,
 ):
-    """清理群友 <未发言天数>：先列出候选，二次确认后再批量移除"""
+    """清理群友 <未发言天数> <入群天数>：先列出候选，二次确认后再批量移除"""
     group_id = event.get_group_id()
     if not group_id:
         yield event.plain_result("本指令仅限群聊使用")
         return
 
     limit = int(getattr(plugin.cfg, "inactive_days_limit", 365) or 365)
+
+    # 未发言天数
     inactive_days = days
     if inactive_days in (None, ""):
-        inactive_days = int(await plugin.store.get(group_id, "inactive_days", 30))
+        inactive_days = int(await plugin.store.get(group_id, "inactive_days", 30) or 30)
     try:
         inactive_days = int(inactive_days)
     except (TypeError, ValueError):
@@ -221,23 +265,41 @@ async def clear_group_member(
     if inactive_days < 1 or inactive_days > limit:
         yield event.plain_result(f"未发言天数请填写 1~{limit} 之间的整数")
         return
-    days = inactive_days
+
+    # 入群天数（可选，0 / 不填表示不限制）
+    joined = joined_days
+    if joined in (None, ""):
+        joined = int(await plugin.store.get(group_id, "joined_days", 0) or 0)
+    else:
+        try:
+            joined = int(joined)
+        except (TypeError, ValueError):
+            yield event.plain_result(f"入群天数请填写 1~{limit} 之间的整数")
+            return
+        if joined < 0 or joined > limit:
+            yield event.plain_result(f"入群天数请填写 1~{limit} 之间的整数")
+            return
+    joined_days_value = joined or None
 
     if confirm:
-        async for result in _run_clear(plugin, event, group_id, days):
+        async for result in _run_clear(
+            plugin, event, group_id, inactive_days, joined_days_value
+        ):
             yield result
         return
 
     try:
         clear_list, unknown_list, whitelisted = await collect_candidates(
-            plugin, event, group_id, days
+            plugin, event, group_id, inactive_days, joined_days_value
         )
     except Exception as e:
         yield event.plain_result(f"获取群成员信息失败：{e}")
         return
 
+    condition = describe_condition(inactive_days, joined_days_value)
+
     if not clear_list:
-        tip = f"没有超过 **{days}** 天未发言的普通群友"
+        tip = f"没有符合条件的普通群友（{condition}）"
         if whitelisted:
             tip += f"（其中 {len(whitelisted)} 位在清理白名单中，已跳过）"
         if unknown_list:
@@ -245,15 +307,9 @@ async def clear_group_member(
         yield event.plain_result(tip)
         return
 
-    lines = [
-        f"共 **{len(clear_list)}** 位群友 **{days}** 天内无发言（仅统计普通成员）：",
-        "",
-    ]
+    lines = [f"共 **{len(clear_list)}** 位群友符合条件（{condition}）：", ""]
     for member in clear_list[:50]:
-        lines.append(
-            f"- **{format_ts(member.get('last_active'))}**｜{member.get('username')}"
-            f"（{member.get('member_openid')}）"
-        )
+        lines.append(format_candidate(member))
     if len(clear_list) > 50:
         lines.append(f"- …… 还有 {len(clear_list) - 50} 位")
     if whitelisted:
@@ -265,9 +321,16 @@ async def clear_group_member(
         )
     if unknown_list:
         lines.append("")
-        lines.append(f"另有 **{len(unknown_list)}** 位群友本地没有发言记录，已跳过")
+        lines.append(
+            f"另有 **{len(unknown_list)}** 位群友本地没有发言记录，已跳过"
+            "（指定入群天数后，这些群友会按「从未发言」参与筛选）"
+        )
     lines.append("")
-    lines.append(f"确认清理请发送 **清理群友 {days} 确认**，取消请忽略本条消息")
+
+    confirm_cmd = "清理群友 " + " ".join(
+        str(v) for v in (inactive_days, joined_days_value, "确认") if v is not None
+    )
+    lines.append(f"确认清理请发送 **{confirm_cmd}**，取消请忽略本条消息")
 
     yield event.plain_result("\n".join(lines))
 
@@ -276,18 +339,22 @@ async def _run_clear(
     plugin: QQAdminPlugin,
     event: AstrMessageEvent,
     group_id: str,
-    days: int,
+    inactive_days: int,
+    joined_days: int | None = None,
 ):
     """二次确认后执行批量移除"""
     await event.send(event.plain_result("清理中..."))
     try:
-        clear_list, _, _ = await collect_candidates(plugin, event, group_id, days)
+        clear_list, _, _ = await collect_candidates(
+            plugin, event, group_id, inactive_days, joined_days
+        )
     except Exception as e:
         yield event.plain_result(f"获取群成员信息失败：{e}")
         return
 
+    condition = describe_condition(inactive_days, joined_days)
     if not clear_list:
-        yield event.plain_result(f"没有超过 **{days}** 天未发言的普通群友")
+        yield event.plain_result(f"没有符合条件的普通群友（{condition}）")
         return
 
     names = {m["member_openid"]: m["username"] for m in clear_list}
@@ -320,6 +387,6 @@ async def _run_clear(
         lines.append(f"失败名单：{shown}")
         if len(failed) > 20:
             lines.append(f"…… 共 {len(failed)} 位")
-    lines.append(f"（按 {days} 天未发言筛选，仅清理普通成员）")
+    lines.append(f"（按 {condition} 筛选，仅清理普通成员）")
 
     yield event.plain_result("\n".join(lines))
