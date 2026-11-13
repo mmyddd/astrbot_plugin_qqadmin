@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import inspect
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from enum import IntEnum
@@ -5,32 +7,24 @@ from functools import wraps
 from typing import Any, cast
 
 from astrbot import logger
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-    AiocqhttpMessageEvent,
-)
+from astrbot.api.event import AstrMessageEvent
 
 from .config import PluginConfig
-from .utils import get_ats
 
 
 class PermLevel(IntEnum):
     """
     定义用户的权限等级。数字越小，权限越高。
+    官方 API 不提供群成员角色以外的信息，因此只有 超管 / 成员 两级判定。
     """
 
     SUPERUSER = 0
-    OWNER = 1
-    ADMIN = 2
-    HIGH = 3
-    MEMBER = 4
-    UNKNOWN = 5
+    MEMBER = 1
+    UNKNOWN = 2
 
     def __str__(self):
         return {
             PermLevel.SUPERUSER: "超管",
-            PermLevel.OWNER: "群主",
-            PermLevel.ADMIN: "管理员",
-            PermLevel.HIGH: "高等级成员",
             PermLevel.MEMBER: "成员",
             PermLevel.UNKNOWN: "未知/无权限",
         }.get(self, "未知/无权限")
@@ -39,9 +33,6 @@ class PermLevel(IntEnum):
     def from_str(cls, perm_str: str):
         mapping = {
             "超管": cls.SUPERUSER,
-            "群主": cls.OWNER,
-            "管理员": cls.ADMIN,
-            "高等级成员": cls.HIGH,
             "成员": cls.MEMBER,
             "未知": cls.UNKNOWN,
             "无权限": cls.UNKNOWN,
@@ -56,68 +47,39 @@ class PermissionManager:
         self.cfg: PluginConfig | None = None
         self.perms: dict[str, PermLevel] | None = None
 
-
     def lazy_init(self, config: PluginConfig):
         if self._initialized:
-            raise RuntimeError("PermissionManager already initialized")
+            return
         self.cfg = config
         self.perms = {k: PermLevel.from_str(v) for k, v in self.cfg.perms.items()}
         self._initialized = True
 
-    async def get_perm_level(
-        self, event: AiocqhttpMessageEvent, user_id: str | int
-    ) -> PermLevel:
-        group_id = event.get_group_id()
-        if int(group_id) == 0 or int(user_id) == 0:
-            return PermLevel.UNKNOWN
-        if self.cfg and str(user_id) in self.cfg.admins_id:
+    async def is_superuser(self, event: AstrMessageEvent) -> bool:
+        sender_id = event.get_sender_id()
+        return bool(self.cfg and sender_id and str(sender_id) in self.cfg.admins_id)
+
+    async def get_perm_level(self, event: AstrMessageEvent) -> PermLevel:
+        if await self.is_superuser(event):
             return PermLevel.SUPERUSER
-        try:
-            info = await event.bot.get_group_member_info(
-                group_id=int(group_id), user_id=int(user_id), no_cache=True
-            )
-        except Exception:
-            return PermLevel.UNKNOWN
-        role = info.get("role", "unknown")
-        level = int(info.get("level", 0))
-        match role:
-            case "owner":
-                return PermLevel.OWNER
-            case "admin":
-                return PermLevel.ADMIN
-            case "member":
-                return (
-                    PermLevel.HIGH
-                    if self.cfg and level >= self.cfg.level_threshold
-                    else PermLevel.MEMBER
-                )
-            case _:
-                return PermLevel.UNKNOWN
+        if event.get_sender_id():
+            return PermLevel.MEMBER
+        return PermLevel.UNKNOWN
 
     async def perm_block(
         self,
-        event: AiocqhttpMessageEvent,
-        bot_perm: PermLevel,
+        event: AstrMessageEvent,
         perm_key: str,
-        check_at: bool = True,
+        group_only: bool = True,
     ) -> str | None:
-        user_level = await self.get_perm_level(event, user_id=event.get_sender_id())
+        if group_only and not event.get_group_id():
+            return "本指令仅限群聊使用"
 
-        # 未指定权限，则默认至少需要管理员权限
-        required_level = (self.perms or {}).get(perm_key, PermLevel.ADMIN)
+        user_level = await self.get_perm_level(event)
+        # 未指定权限，则默认至少需要成员权限
+        required_level = (self.perms or {}).get(perm_key, PermLevel.MEMBER)
 
         if user_level > required_level:
             return f"你没{required_level}权限"
-
-        bot_level = await self.get_perm_level(event, user_id=event.get_self_id())
-        if bot_level > bot_perm:
-            return f"我没{bot_perm}权限"
-
-        if check_at:
-            for at_id in get_ats(event):
-                at_level = await self.get_perm_level(event, user_id=at_id)
-                if bot_level >= at_level:
-                    return f"我动不了{at_level}"
 
         return None
 
@@ -125,16 +87,11 @@ class PermissionManager:
 perm_manager = PermissionManager()
 
 
-def perm_required(
-    bot_perm: PermLevel = PermLevel.ADMIN,
-    perm_key: str | None = None,
-    check_at: bool = True,
-):
+def perm_required(perm_key: str | None = None, group_only: bool = True):
     """
     权限检查装饰器。
     :param perm_key: 可选。用户执行命令所需的最低权限键名，默认使用被装饰函数的函数名。
-    :param bot_perm: Bot 执行此命令所需的最低权限等级。
-    :param check_at: 是否检查“是否有权对被@者实施操作”。
+    :param group_only: 是否仅限群聊使用。
     """
 
     def decorator(
@@ -145,31 +102,21 @@ def perm_required(
         @wraps(func)
         async def wrapper(
             plugin_instance: Any,
-            event: AiocqhttpMessageEvent,
+            event: AstrMessageEvent,
             *args: Any,
             **kwargs: Any,
         ) -> AsyncGenerator[Any, Any]:
-
-            # 仅限aiocqhttp
-            if event.platform_meta.name != "aiocqhttp":
-                return
-
-            # 仅限群聊
-            if event.is_private_chat():
-                return
-
             # 权限管理未初始化
             if not perm_manager._initialized:
                 logger.error(
-                    f"PermissionManager 未初始化（尝试访问权限项：{perm_key}）"
+                    f"PermissionManager 未初始化（尝试访问权限项：{actual_perm_key}）"
                 )
                 yield event.plain_result("内部错误：权限系统未正确加载")
                 event.stop_event()
                 return
 
-            # 判断权限
             result = await perm_manager.perm_block(
-                event, bot_perm=bot_perm, perm_key=actual_perm_key, check_at=check_at
+                event, perm_key=actual_perm_key, group_only=group_only
             )
             if result:
                 yield event.plain_result(result)

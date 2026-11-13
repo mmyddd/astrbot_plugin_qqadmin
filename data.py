@@ -1,36 +1,23 @@
 import asyncio
 import json
+import time
 
 import aiosqlite
 
 from astrbot.api import logger
 
-from .utils import parse_bool
 from .config import PluginConfig
 
-class QQAdminDB:
+
+class ActivityStore:
     """
-    群管插件数据库（极简 API + 动态字段 + 自动补齐）
+    群管配置 + 群友活跃记录（官方 API 没有「最后发言时间」和「群等级」，
+    这里通过监听群消息，在本地记录每位群友的最后发言时间）
     """
 
     # ====================== 字段中英文映射 ======================
     FIELD_MAP = {
-        "join_switch": "进群审核",
-        "join_min_level": "进群等级门槛",
-        "join_max_time": "进群尝试次数",
-        "join_accept_words": "进群白词",
-        "join_reject_words": "进群黑词",
-        "join_no_match_reject": "未中白词拒绝",
-        "reject_word_block": "命中黑词拉黑",
-        "block_ids": "进群黑名单",
-        "join_welcome": "进群欢迎词",
-        "join_ban_time": "进群禁言时长",
-        "leave_notify": "主动退群通知",
-        "leave_block": "主动退群拉黑",
-        "builtin_ban": "启用内置禁词",
-        "custom_ban_words": "自定义违禁词",
-        "word_ban_time": "禁词禁言时长",
-        "spamming_ban_time": "刷屏禁言时长",
+        "inactive_days": "未发言天数",
     }
 
     REVERSE_FIELD_MAP = {v: k for k, v in FIELD_MAP.items()}
@@ -39,14 +26,16 @@ class QQAdminDB:
 
     def __init__(self, config: PluginConfig):
         self.db_path = config.db_path
-
-        # 默认字段（动态配置核心）
         self.default_cfg: dict = config.default
 
-        self._conn = None
-        self._cache = {}
+        self._conn: aiosqlite.Connection | None = None
+        self._cache: dict[str, dict] = {}
         self._initialized = False
         self._init_lock = asyncio.Lock()
+
+        # 活跃度写入节流：同一群友 60 秒内只落库一次，避免每条群消息都写盘
+        self._touch_cache: dict[tuple[str, str], float] = {}
+        self._touch_interval = 60.0
 
     # ============================== 初始化 ==============================
 
@@ -65,9 +54,17 @@ class QQAdminDB:
                     data TEXT NOT NULL
                 );
             """)
+            await self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS member_activity (
+                    group_id TEXT NOT NULL,
+                    member_openid TEXT NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    last_active REAL NOT NULL,
+                    PRIMARY KEY (group_id, member_openid)
+                );
+            """)
             await self._conn.commit()
 
-            # 加载缓存
             async with self._conn.execute("SELECT group_id, data FROM groups;") as cur:
                 async for row in cur:
                     try:
@@ -92,7 +89,7 @@ class QQAdminDB:
         )
         await self._conn.commit()
 
-    # ============================== 基础：确保配置存在 ==============================
+    # ============================== 群配置 ==============================
 
     async def ensure_group(self, gid: str):
         """确保存在群配置，若没有则按 default_cfg 初始化"""
@@ -100,12 +97,8 @@ class QQAdminDB:
             self._cache[gid] = json.loads(json.dumps(self.default_cfg))
             await self._save_to_db(gid, self._cache[gid])
 
-    # ============================== 🔥 极简 API ==============================
-
     async def all(self, gid: str) -> dict:
-        """
-        获取整个配置，并自动补齐 default_cfg 的字段
-        """
+        """获取整个配置，并自动补齐 default_cfg 的字段"""
         await self.ensure_group(gid)
         data = self._cache[gid]
 
@@ -121,9 +114,7 @@ class QQAdminDB:
         return data
 
     async def get(self, gid: str, field: str, default=None):
-        """
-        读字段，不存在则补齐 default
-        """
+        """读字段，不存在则补齐 default"""
         await self.ensure_group(gid)
         data = self._cache[gid]
 
@@ -134,37 +125,77 @@ class QQAdminDB:
         return data[field]
 
     async def set(self, gid: str, field: str, value):
-        """
-        写入字段
-        """
+        """写入字段"""
         await self.ensure_group(gid)
         self._cache[gid][field] = value
         await self._save_to_db(gid, self._cache[gid])
 
-    async def add(self, gid: str, field: str, value):
-        """
-        列表字段追加（自动创建列表）
-        """
-        lst = list(await self.get(gid, field, []))
-        if value not in lst:
-            lst.append(value)
-            await self.set(gid, field, lst)
+    async def reset_to_default(self, gid: str | None = None):
+        """把指定群（或全部群）配置恢复成 default_cfg"""
+        targets = [gid] if gid else list(self._cache.keys())
+        for g in targets:
+            self._cache[g] = json.loads(json.dumps(self.default_cfg))
+            await self._save_to_db(g, self._cache[g])
 
-    async def remove(self, gid: str, field: str, value):
-        """
-        列表字段删除（自动创建列表）
-        """
-        lst = [i for i in await self.get(gid, field, []) if i != value]
-        await self.set(gid, field, lst)
+        logger.info(f"群聊{gid}的群管配置已重置为默认值")
 
-    # ============================== 删除群配置 ==============================
+    # ====================== 群友活跃记录 ======================
 
-    async def delete_group(self, gid: str):
-        """彻底删除群配置"""
-        if self._conn:
-            await self._conn.execute("DELETE FROM groups WHERE group_id = ?", (gid,))
-            await self._conn.commit()
-        self._cache.pop(gid, None)
+    async def touch(self, group_id: str, member_openid: str, username: str = ""):
+        """记录（或刷新）某位群友的最后发言时间"""
+        if not self._conn:
+            raise RuntimeError("请先 init()")
+
+        key = (str(group_id), str(member_openid))
+        now = time.time()
+        if now - self._touch_cache.get(key, 0.0) < self._touch_interval:
+            return
+        self._touch_cache[key] = now
+
+        await self._conn.execute(
+            """
+            INSERT INTO member_activity(group_id, member_openid, username, last_active)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(group_id, member_openid) DO UPDATE SET
+                username=excluded.username,
+                last_active=excluded.last_active;
+            """,
+            (str(group_id), str(member_openid), username or "", now),
+        )
+        await self._conn.commit()
+
+    async def get_activity(self, group_id: str) -> dict[str, dict]:
+        """获取本群全部活跃记录：{member_openid: {"username": str, "last_active": float}}"""
+        if not self._conn:
+            raise RuntimeError("请先 init()")
+
+        result: dict[str, dict] = {}
+        async with self._conn.execute(
+            "SELECT member_openid, username, last_active FROM member_activity WHERE group_id = ?;",
+            (str(group_id),),
+        ) as cur:
+            async for row in cur:
+                result[row["member_openid"]] = {
+                    "username": row["username"],
+                    "last_active": float(row["last_active"]),
+                }
+        return result
+
+    async def clear_activity(self, group_id: str | None = None):
+        """清空活跃记录（指定群或全部群）"""
+        if not self._conn:
+            raise RuntimeError("请先 init()")
+
+        if group_id:
+            await self._conn.execute(
+                "DELETE FROM member_activity WHERE group_id = ?;", (str(group_id),)
+            )
+            for key in [k for k in self._touch_cache if k[0] == str(group_id)]:
+                self._touch_cache.pop(key, None)
+        else:
+            await self._conn.execute("DELETE FROM member_activity;")
+            self._touch_cache.clear()
+        await self._conn.commit()
 
     # ============================== 关闭 ==============================
 
@@ -174,46 +205,19 @@ class QQAdminDB:
             self._conn = None
             self._initialized = False
 
-
     # ====================== 中文展示、读回 ======================
 
     async def export_cn_lines(self, gid: str) -> str:
-        """
-        以中文键名 + 多行文本形式输出群配置。
-        - 列表字段：用空格分隔
-        - 布尔：开 / 关
-        - 其它类型按原样输出
-        """
+        """以中文键名 + 多行文本形式输出群配置"""
         data = await self.all(gid)
         lines = []
-
         for eng_key, value in data.items():
             cn_key = self.FIELD_MAP.get(eng_key, eng_key)
-
-            # 列表字段 => 用空格分隔
-            if isinstance(value, list):
-                val_str = " ".join(map(str, value))
-
-            # 布尔字段 => 显示 为“开 / 关”
-            elif isinstance(value, bool):
-                val_str = "开" if value else "关"
-
-            # 其他字段 => 按原样
-            else:
-                val_str = str(value)
-
-            lines.append(f"{cn_key}: {val_str}")
-
+            lines.append(f"{cn_key}: {value}")
         return "\n".join(lines)
 
     async def import_cn_lines(self, gid: str, text: str) -> dict:
-        """
-        解析用户提交的中文多行文本并写回 DB
-        - 列表字段：空格分隔
-        - 布尔：开/关/开启/on/off/true/false/1/0
-        - 数字：自动转 int
-        - 字符串：原样保存
-        """
+        """解析用户提交的中文多行文本并写回 DB"""
         await self.ensure_group(gid)
         data = self._cache[gid]
 
@@ -230,41 +234,13 @@ class QQAdminDB:
                 continue
 
             old_val = data.get(eng_key)
-
-            # 如果原字段是 bool，则优先进行布尔解析
-            if isinstance(old_val, bool):
-                parsed = parse_bool(raw_v)
-                if parsed is not None:
-                    data[eng_key] = parsed
-                    continue
-                # 若解析失败，退回默认字面处理（防错）
-
-            # 列表字段：按空格拆
-            if isinstance(old_val, list):
-                value = [x for x in raw_v.split() if x]
-
-            # 数字字段：自动转 int
-            elif isinstance(old_val, int):
+            if isinstance(old_val, int) and not isinstance(old_val, bool):
                 try:
-                    value = int(raw_v)
+                    data[eng_key] = int(raw_v)
                 except ValueError:
-                    value = old_val  # 防错保底
-
-            # 字符串字段
+                    continue
             else:
-                value = raw_v
-
-            data[eng_key] = value
+                data[eng_key] = raw_v
 
         await self._save_to_db(gid, data)
         return data
-
-
-    async def reset_to_default(self, gid: str | None = None):
-        """把指定群（或全部群）配置恢复成 default_cfg"""
-        targets = [gid] if gid else list(self._cache.keys())
-        for g in targets:
-            self._cache[g] = json.loads(json.dumps(self.default_cfg))
-            await self._save_to_db(g, self._cache[g])
-
-        logger.info(f"群聊{gid}的群管配置已重置为默认值")

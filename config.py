@@ -1,9 +1,8 @@
 # config.py
 from __future__ import annotations
 
-from pathlib import Path
 from collections.abc import Mapping, MutableMapping
-import random
+from pathlib import Path
 from types import MappingProxyType, UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
@@ -108,23 +107,13 @@ class ConfigNode:
 # ============ 插件自定义配置 ==================
 
 
-class VoteBanConfig(ConfigNode):
-    ttl: int
-    threshold: int
-
-
 class PluginConfig(ConfigNode):
-    divided_manage: bool
     default: dict
-    admin_audit: bool
-    random_ban_time: str
-    vote_ban: VoteBanConfig
-    llm_get_msg_count: int
-    level_threshold: int
+    inactive_days_limit: int
+    clear_batch_size: int
     perms: dict
-    clear_member_skip_special_title: bool
 
-    _db_version = 3
+    _db_version = 4
     _plugin_name: str = "astrbot_plugin_qqadmin"
 
     def __init__(self, cfg: AstrBotConfig, context: Context):
@@ -136,30 +125,11 @@ class PluginConfig(ConfigNode):
         self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
 
         self.db_path = self.data_dir / f"qqadmin_data_v{self._db_version}.db"
-        self.ban_lexicon_path = self.plugin_dir / "SensitiveLexicon.json"
-        self.group_notice_dir = self.data_dir / "group_notice"
-        self.group_notice_dir.mkdir(parents=True, exist_ok=True)
-        self.curfew_file = self.data_dir / "curfew_data.json"
-        if not self.curfew_file.exists():
-            self.curfew_file.write_text("{}", encoding="utf-8")
-        self.file_dir = self.data_dir / "file"
-        self.file_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # 随机禁言时间范围(最大值不超过一个月, 即2592000秒)
-        min_ban_time, max_ban_time = map(int, self.random_ban_time.split("~"))
-        self.min_ban_time = max(min_ban_time, 1)
-        self.max_ban_time = min(max_ban_time, 2592000)
-        self.spamming_count = 5
-        self.spamming_interval = 0.5
+        self.batch_size = max(1, min(int(self.clear_batch_size or 20), 20))
 
     @staticmethod
     def _clean_ids(ids: list) -> list[str]:
         """过滤并规范化数字 ID"""
         return [str(i) for i in ids if str(i).isdigit()]
-
-    def get_ban_time(self, seconds=None) -> int:
-        """获取禁言时间"""
-        if not seconds or not isinstance(seconds, int):
-            return random.randint(self.min_ban_time, self.max_ban_time)
-        else:
-            return min(max(seconds, self.min_ban_time), self.max_ban_time)
