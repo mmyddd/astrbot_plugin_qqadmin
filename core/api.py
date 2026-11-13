@@ -42,11 +42,21 @@ class QQOfficialApi:
         event: Any,
         method: str,
         path: str,
+        path_params: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        """调用官方 API；遇到 11253 白名单错误时给出可读提示"""
+        """调用官方 API。
+
+        botpy 的 Route 只有在收到路径参数时才会做占位替换，
+        所以 {group_openid} 这类占位必须通过 path_params 传入，
+        否则会把字面量花括号发出去，服务端会报参数无效。
+        """
         http = cls.get_http(event)
-        route = Route(method, path)
+        route = Route(method, path, **(path_params or {}))
+
+        if "{" in route.url:
+            raise RuntimeError(f"官方接口路径参数缺失：{path}")
+
         try:
             return await http.request(route, **kwargs)
         except Exception as e:
@@ -62,14 +72,16 @@ class QQOfficialApi:
         members: list[dict] = []
         cursor = ""
         while True:
-            payload: dict[str, Any] = {}
+            kwargs: dict[str, Any] = {}
             if cursor:
-                payload["cursor"] = cursor
+                # GET 查询参数必须走 params，放进 json 会被当作请求体
+                kwargs["params"] = {"cursor": cursor}
             data = await cls.request(
                 event,
                 "GET",
                 "/v2/groups/{group_openid}/members",
-                json=payload,
+                path_params={"group_openid": group_openid},
+                **kwargs,
             )
             if not isinstance(data, dict):
                 break
@@ -88,7 +100,10 @@ class QQOfficialApi:
             event,
             "GET",
             "/v2/groups/{group_openid}/members/{member_openid}",
-            json={},
+            path_params={
+                "group_openid": group_openid,
+                "member_openid": member_openid,
+            },
         )
         return data if isinstance(data, dict) else {}
 
@@ -127,6 +142,7 @@ class QQOfficialApi:
             event,
             "POST",
             "/v2/groups/{group_openid}/batch_remove_members",
+            path_params={"group_openid": group_openid},
             json={
                 "member_openids": member_openids,
                 "add_to_member_blacklist": add_to_member_blacklist,

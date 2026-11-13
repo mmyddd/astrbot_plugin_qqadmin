@@ -87,6 +87,7 @@ async def get_group_member_list(plugin: QQAdminPlugin, event: AstrMessageEvent):
     try:
         members = await QQOfficialApi.get_members(event, group_id)
     except Exception as e:
+        logger.error(f"[群友信息] 获取群成员失败：{e}")
         yield event.plain_result(f"获取群成员信息失败：{e}")
         return
 
