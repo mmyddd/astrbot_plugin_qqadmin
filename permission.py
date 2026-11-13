@@ -85,23 +85,24 @@ class PermissionManager:
     # ====================== 超管判定 ======================
 
     async def is_superuser(self, event: AstrMessageEvent) -> bool:
-        """超管 = AstrBot 全局 admins_id（与插件改造前保持一致）。
+        """超管只认 AstrBot 全局管理员（admins_id），不引入其它来源。
 
-        两个来源都会认：
-        1. AstrBot 唤醒阶段已经比对过 admins_id，命中时会把 event.role 置为 admin；
-        2. 这里再比对一次 admins_id，忽略大小写，兼容官方接口下发的 OpenID。
+        直接读取 AstrBot 当前配置，改完 admins_id 无需重载插件即可生效。
         """
-        if getattr(event, "role", None) == "admin":
-            return True
-
-        if not self.cfg:
+        if not self.cfg or not self.cfg.context:
             return False
 
-        sender_id = str(event.get_sender_id() or "").strip().lower()
+        sender_id = str(event.get_sender_id() or "").strip()
         if not sender_id:
             return False
 
-        candidates = {str(i).strip().lower() for i in self.cfg.admins_id}
+        try:
+            admin_ids = self.cfg.context.get_config().get("admins_id", []) or []
+        except Exception as e:
+            logger.warning(f"[权限] 读取 AstrBot admins_id 失败：{e}")
+            admin_ids = self.cfg.admins_id
+
+        candidates = {str(i).strip() for i in admin_ids if str(i).strip()}
         return sender_id in candidates
 
     # ====================== 群成员角色 ======================
@@ -201,7 +202,7 @@ class PermissionManager:
                 f"你没{required_level}权限，且官方成员接口暂时取不到你的群身份"
                 "（通常是未开通白名单导致的 11253）。\n"
                 "可发送「我的信息」查看自己的 OpenID，"
-                "再把它加进 AstrBot 的 admins_id（全局管理员）"
+                "超管只认 AstrBot 的 admins_id，需要时把它加进去"
             )
 
         return f"你没{required_level}权限"

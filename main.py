@@ -87,9 +87,20 @@ class QQAdminPlugin(Star):
             f"- 是否超管：{'是' if is_super else '否'}",
         ]
         if not is_super:
+            admin_ids = []
+            try:
+                admin_ids = list(
+                    self.context.get_config().get("admins_id", []) or []
+                )
+            except Exception:
+                admin_ids = list(self.cfg.admins_id)
             lines.append("")
             lines.append(
-                "如需超管权限：把上面的 OpenID 填进 AstrBot 的「管理员 ID」列表"
+                "- AstrBot 当前 admins_id：" + ("、".join(map(str, admin_ids)) or "（空）")
+            )
+            lines.append(
+                "超管只认 AstrBot 的 admins_id；官方接口下发的是 OpenID，"
+                "所以这里需要填上面这串 OpenID"
             )
         yield event.plain_result("\n".join(lines))
 
